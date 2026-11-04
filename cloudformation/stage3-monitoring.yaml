@@ -1,0 +1,204 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Stage 3 - Monitoring and alerting for the AWS self-healing project.
+  Creates an SNS topic with an email subscription, four CloudWatch alarms
+  and a dashboard. Requires the Stage 2 compute stack to be deployed first.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: self-healing
+    Description: Must match the ProjectName used in Stage 1 and Stage 2
+
+  AlertEmail:
+    Type: String
+    AllowedPattern: '[^@\s]+@[^@\s]+\.[^@\s]+'
+    ConstraintDescription: Enter a valid email address
+    Description: Where alarm notifications are sent (you must confirm the subscription by email)
+
+  CpuThreshold:
+    Type: Number
+    Default: 70
+    Description: Average CPU percent above which the high-CPU alarm fires
+
+Resources:
+  # ---------- SNS: the phone alert ----------
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-alerts'
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  # ---------- Alarm 1: servers overloaded ----------
+  HighCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-high-cpu'
+      AlarmDescription: Average CPU across the Auto Scaling Group is high
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !ImportValue
+            Fn::Sub: '${ProjectName}-AsgName'
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref CpuThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # ---------- Alarm 2: a server is failing the load balancer health check ----------
+  UnhealthyHostsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-unhealthy-hosts'
+      AlarmDescription: At least one target is failing the /health check
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - Name: TargetGroup
+          Value: !ImportValue
+            Fn::Sub: '${ProjectName}-TgFullName'
+        - Name: LoadBalancer
+          Value: !ImportValue
+            Fn::Sub: '${ProjectName}-AlbFullName'
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # ---------- Alarm 3: fewer than 2 healthy servers ----------
+  LowHealthyHostsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-low-healthy-hosts'
+      AlarmDescription: Fewer than 2 healthy targets are serving traffic
+      Namespace: AWS/ApplicationELB
+      MetricName: HealthyHostCount
+      Dimensions:
+        - Name: TargetGroup
+          Value: !ImportValue
+            Fn::Sub: '${ProjectName}-TgFullName'
+        - Name: LoadBalancer
+          Value: !ImportValue
+            Fn::Sub: '${ProjectName}-AlbFullName'
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 2
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # ---------- Alarm 4: the app is returning errors ----------
+  Target5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-5xx-errors'
+      AlarmDescription: The application returned 5 or more server errors in one minute
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !ImportValue
+            Fn::Sub: '${ProjectName}-AlbFullName'
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # ---------- Dashboard: everything on one screen ----------
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ProjectName}-dashboard'
+      DashboardBody: !Sub
+        - |
+          {
+            "widgets": [
+              {
+                "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+                "properties": {
+                  "title": "CPU utilization (ASG average)",
+                  "region": "${AWS::Region}",
+                  "stat": "Average",
+                  "period": 300,
+                  "metrics": [["AWS/EC2", "CPUUtilization", "AutoScalingGroupName", "${Asg}"]]
+                }
+              },
+              {
+                "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
+                "properties": {
+                  "title": "Healthy and unhealthy targets",
+                  "region": "${AWS::Region}",
+                  "stat": "Maximum",
+                  "period": 60,
+                  "metrics": [
+                    ["AWS/ApplicationELB", "HealthyHostCount", "TargetGroup", "${Tg}", "LoadBalancer", "${Lb}"],
+                    ["AWS/ApplicationELB", "UnHealthyHostCount", "TargetGroup", "${Tg}", "LoadBalancer", "${Lb}"]
+                  ]
+                }
+              },
+              {
+                "type": "metric", "x": 0, "y": 6, "width": 12, "height": 6,
+                "properties": {
+                  "title": "Requests and 5xx errors",
+                  "region": "${AWS::Region}",
+                  "stat": "Sum",
+                  "period": 60,
+                  "metrics": [
+                    ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${Lb}"],
+                    ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "${Lb}"]
+                  ]
+                }
+              },
+              {
+                "type": "alarm", "x": 12, "y": 6, "width": 12, "height": 6,
+                "properties": {
+                  "title": "Alarm status",
+                  "alarms": ["${CpuArn}", "${UnhealthyArn}", "${LowHealthyArn}", "${Arn5xx}"]
+                }
+              }
+            ]
+          }
+        - Asg: !ImportValue
+            Fn::Sub: '${ProjectName}-AsgName'
+          Tg: !ImportValue
+            Fn::Sub: '${ProjectName}-TgFullName'
+          Lb: !ImportValue
+            Fn::Sub: '${ProjectName}-AlbFullName'
+          CpuArn: !GetAtt HighCpuAlarm.Arn
+          UnhealthyArn: !GetAtt UnhealthyHostsAlarm.Arn
+          LowHealthyArn: !GetAtt LowHealthyHostsAlarm.Arn
+          Arn5xx: !GetAtt Target5xxAlarm.Arn
+
+Outputs:
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub '${ProjectName}-AlertTopicArn'
+
+  DashboardName:
+    Value: !Ref Dashboard

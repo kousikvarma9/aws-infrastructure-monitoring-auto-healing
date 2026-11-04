@@ -1,0 +1,237 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Stage 4 - Auto-healing for the AWS self-healing project.
+  Creates an SSM Automation runbook (restart the app, then escalate to instance
+  replacement), an EventBridge rule that starts it when the unhealthy-hosts alarm
+  fires, the IAM roles they need, and a CPU-based scale-out policy.
+  Requires Stage 1, 2 and 3 to be deployed first.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: self-healing
+    Description: Must match the ProjectName used in the earlier stacks
+
+  ScriptRuntime:
+    Type: String
+    Default: python3.11
+    Description: >
+      Python runtime used by the runbook script step. If CloudFormation reports
+      the runtime is not supported, choose a newer one from the SSM documentation.
+
+  CpuTarget:
+    Type: Number
+    Default: 60
+    Description: Target average CPU percent. The Auto Scaling Group adds or removes servers to stay near it.
+
+Resources:
+  # ---------- Role the runbook runs as (least privilege) ----------
+  AutomationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: heal-runbook-permissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTargetHealth
+                Effect: Allow
+                Action: elasticloadbalancing:DescribeTargetHealth
+                Resource: '*'
+              - Sid: RunCommandDocument
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript'
+              - Sid: RunCommandOnProjectInstances
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                Condition:
+                  StringEquals:
+                    'ssm:resourceTag/Project': !Ref ProjectName
+              - Sid: MarkInstanceUnhealthy
+                Effect: Allow
+                Action: autoscaling:SetInstanceHealth
+                Resource: !Sub
+                  - 'arn:${AWS::Partition}:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${AsgName}'
+                  - AsgName: !ImportValue
+                      Fn::Sub: '${ProjectName}-AsgName'
+
+  # ---------- Role EventBridge uses to start the runbook ----------
+  EventsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: start-heal-runbook
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ssm:StartAutomationExecution
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${ProjectName}-heal-unhealthy-targets:*'
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt AutomationRole.Arn
+                Condition:
+                  StringEquals:
+                    'iam:PassedToService': ssm.amazonaws.com
+
+  # ---------- The runbook: the manager's fix-it checklist ----------
+  HealDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${ProjectName}-heal-unhealthy-targets'
+      DocumentType: Automation
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: '0.3'
+        description: >-
+          Find unhealthy targets, restart the app on them, wait, and if they are
+          still unhealthy mark them unhealthy so the Auto Scaling Group replaces them.
+        assumeRole: '{{ AutomationAssumeRole }}'
+        parameters:
+          AutomationAssumeRole:
+            type: String
+            default: !GetAtt AutomationRole.Arn
+          TargetGroupArn:
+            type: String
+            default: !Sub
+              - 'arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:${TgFullName}'
+              - TgFullName: !ImportValue
+                  Fn::Sub: '${ProjectName}-TgFullName'
+          AsgName:
+            type: String
+            default: !ImportValue
+              Fn::Sub: '${ProjectName}-AsgName'
+        mainSteps:
+          - name: healUnhealthyTargets
+            action: aws:executeScript
+            timeoutSeconds: 240
+            inputs:
+              Runtime: !Ref ScriptRuntime
+              Handler: handler
+              InputPayload:
+                TargetGroupArn: '{{ TargetGroupArn }}'
+                AsgName: '{{ AsgName }}'
+              Script: |
+                import time
+                import boto3
+
+                def handler(events, context):
+                    tg_arn = events['TargetGroupArn']
+                    elb = boto3.client('elbv2')
+                    ssm = boto3.client('ssm')
+                    autoscaling = boto3.client('autoscaling')
+
+                    def unhealthy_ids():
+                        resp = elb.describe_target_health(TargetGroupArn=tg_arn)
+                        return [d['Target']['Id'] for d in resp['TargetHealthDescriptions']
+                                if d['TargetHealth']['State'] == 'unhealthy']
+
+                    bad = unhealthy_ids()
+                    if not bad:
+                        return {'result': 'No unhealthy targets, nothing to do'}
+
+                    notes = ['Unhealthy targets found: ' + ', '.join(bad)]
+
+                    # Layer 1: cheap fix - restart the app on each unhealthy instance
+                    try:
+                        ssm.send_command(
+                            InstanceIds=bad,
+                            DocumentName='AWS-RunShellScript',
+                            Parameters={'commands': [
+                                'rm -f /opt/app/unhealthy',
+                                'systemctl restart demoapp']},
+                            Comment='self-healing runbook: restart app')
+                        notes.append('Restart command sent')
+                    except Exception as err:
+                        notes.append('Restart not possible: ' + str(err)[:150])
+
+                    # Wait up to ~90 seconds for the load balancer to see them healthy again
+                    remaining = bad
+                    for _ in range(9):
+                        time.sleep(10)
+                        remaining = [i for i in unhealthy_ids() if i in bad]
+                        if not remaining:
+                            break
+
+                    if not remaining:
+                        notes.append('Recovered by restart')
+                        return {'result': '; '.join(notes)}
+
+                    # Layer 2: escalate - ask the Auto Scaling Group to replace the instance
+                    for instance_id in remaining:
+                        autoscaling.set_instance_health(
+                            InstanceId=instance_id,
+                            HealthStatus='Unhealthy',
+                            ShouldRespectGracePeriod=False)
+                    notes.append('Escalated to replacement: ' + ', '.join(remaining))
+                    return {'result': '; '.join(notes)}
+            outputs:
+              - Name: Result
+                Selector: $.Payload.result
+                Type: String
+
+  # ---------- Trigger: when the unhealthy-hosts alarm goes into ALARM, start the runbook ----------
+  HealRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-start-heal-runbook'
+      Description: Starts the healing runbook when the unhealthy-hosts alarm fires
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.cloudwatch
+        detail-type:
+          - CloudWatch Alarm State Change
+        detail:
+          alarmName:
+            - !Sub '${ProjectName}-unhealthy-hosts'
+          state:
+            value:
+              - ALARM
+      Targets:
+        - Id: RunHealRunbook
+          Arn: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${HealDocument}:$DEFAULT'
+          RoleArn: !GetAtt EventsRole.Arn
+          Input: !Sub
+            - '{"AutomationAssumeRole":["${RoleArn}"],"TargetGroupArn":["arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:${TgFullName}"],"AsgName":["${AsgName}"]}'
+            - RoleArn: !GetAtt AutomationRole.Arn
+              TgFullName: !ImportValue
+                Fn::Sub: '${ProjectName}-TgFullName'
+              AsgName: !ImportValue
+                Fn::Sub: '${ProjectName}-AsgName'
+
+  # ---------- Scale out when servers are busy (and back in when quiet) ----------
+  CpuScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !ImportValue
+        Fn::Sub: '${ProjectName}-AsgName'
+      PolicyType: TargetTrackingScaling
+      EstimatedInstanceWarmup: 120
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: !Ref CpuTarget
+
+Outputs:
+  RunbookName:
+    Value: !Ref HealDocument
+
+  TriggerRuleName:
+    Value: !Ref HealRule

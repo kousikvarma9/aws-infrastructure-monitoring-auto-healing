@@ -1,0 +1,275 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Stage 2 - Servers and traffic for the AWS self-healing project.
+  Creates security groups, an IAM role, a Launch Template, an Application
+  Load Balancer, a Target Group and an Auto Scaling Group (2 instances).
+  Requires the Stage 1 network stack to be deployed first.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: self-healing
+    Description: Must match the ProjectName used in the Stage 1 stack (used to import its outputs)
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    Description: Smallest practical size. Check your account's Free Tier page for eligible types.
+
+  AllowedCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: >
+      Who may reach the load balancer on port 80. Best practice for this lab:
+      use your own public IP, for example 203.0.113.25/32.
+
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Latest Amazon Linux 2023 AMI (resolved by AWS at deploy time)
+
+Resources:
+  # ---------- Security groups ----------
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP to the load balancer
+      VpcId: !ImportValue
+        Fn::Sub: '${ProjectName}-VpcId'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedCidr
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-alb-sg'
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP only from the load balancer
+      VpcId: !ImportValue
+        Fn::Sub: '${ProjectName}-VpcId'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-instance-sg'
+
+  # ---------- IAM role so instances can be managed through SSM ----------
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-instance-role'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  # ---------- Launch Template: the recipe for every server ----------
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref InstanceSecurityGroup
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${ProjectName}-app'
+              - Key: Project
+                Value: !Ref ProjectName
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            # Tiny demo web app using only Python's standard library (no internet needed).
+            mkdir -p /opt/app
+            cat > /opt/app/app.py <<'PYEOF'
+            import http.server
+            import os
+            import threading
+            import urllib.request
+
+            def imds(path):
+                # Read instance details using IMDSv2 (token-based)
+                try:
+                    req = urllib.request.Request(
+                        "http://169.254.169.254/latest/api/token",
+                        method="PUT",
+                        headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"},
+                    )
+                    token = urllib.request.urlopen(req, timeout=2).read().decode()
+                    req2 = urllib.request.Request(
+                        "http://169.254.169.254/latest/meta-data/" + path,
+                        headers={"X-aws-ec2-metadata-token": token},
+                    )
+                    return urllib.request.urlopen(req2, timeout=2).read().decode()
+                except Exception:
+                    return "unknown"
+
+            INSTANCE_ID = imds("instance-id")
+            AZ = imds("placement/availability-zone")
+
+            class Handler(http.server.BaseHTTPRequestHandler):
+                def send(self, code, body):
+                    data = body.encode()
+                    self.send_response(code)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+
+                def do_GET(self):
+                    if self.path == "/health":
+                        # Create the file /opt/app/unhealthy to simulate a failing app
+                        if os.path.exists("/opt/app/unhealthy"):
+                            self.send(500, "unhealthy")
+                        else:
+                            self.send(200, "ok")
+                    elif self.path == "/error":
+                        self.send(500, "intentional error")
+                    elif self.path == "/crash":
+                        # Used later in failure tests: the app process exits
+                        self.send(200, "crashing")
+                        threading.Timer(0.5, lambda: os._exit(1)).start()
+                    else:
+                        self.send(200, "Hello from " + INSTANCE_ID + " in " + AZ + "\n")
+
+                def log_message(self, *args):
+                    pass
+
+            http.server.ThreadingHTTPServer(("0.0.0.0", 80), Handler).serve_forever()
+            PYEOF
+
+            cat > /etc/systemd/system/demoapp.service <<'SVCEOF'
+            [Unit]
+            Description=Demo web app
+            After=network.target
+
+            [Service]
+            ExecStart=/usr/bin/python3 /opt/app/app.py
+            Restart=no
+
+            [Install]
+            WantedBy=multi-user.target
+            SVCEOF
+
+            systemctl daemon-reload
+            systemctl enable --now demoapp
+
+  # ---------- Application Load Balancer ----------
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      Subnets: !Split
+        - ','
+        - !ImportValue
+          Fn::Sub: '${ProjectName}-PublicSubnetIds'
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-alb'
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: '${ProjectName}-VpcId'
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-tg'
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ---------- Auto Scaling Group: keeps 2 healthy servers running ----------
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: Listener
+    Properties:
+      MinSize: '2'
+      DesiredCapacity: '2'
+      MaxSize: '4'
+      VPCZoneIdentifier: !Split
+        - ','
+        - !ImportValue
+          Fn::Sub: '${ProjectName}-PrivateSubnetIds'
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 120
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-app'
+          PropagateAtLaunch: true
+
+Outputs:
+  AlbDnsName:
+    Description: Open this in a browser to reach the app
+    Value: !Sub 'http://${LoadBalancer.DNSName}'
+
+  AutoScalingGroupName:
+    Value: !Ref AutoScalingGroup
+    Export:
+      Name: !Sub '${ProjectName}-AsgName'
+
+  LoadBalancerFullName:
+    Value: !GetAtt LoadBalancer.LoadBalancerFullName
+    Export:
+      Name: !Sub '${ProjectName}-AlbFullName'
+
+  TargetGroupFullName:
+    Value: !GetAtt TargetGroup.TargetGroupFullName
+    Export:
+      Name: !Sub '${ProjectName}-TgFullName'
