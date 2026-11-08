@@ -119,9 +119,8 @@ Delete the stacks in reverse order: healing, monitoring, compute, then network. 
 
 ## 🧪 Testing status
 
-The infrastructure was deployed stage by stage. The failure tests are planned, but their results are **not published yet**.
+The infrastructure was deployed stage by stage. The failure tests are done, but their results are **not published yet**.
 See [docs/test-plan.md](docs/test-plan.md) for the 10 planned scenarios and the expected behaviour, and `tools/probe.py` for the script that measures what a visitor sees during a failure.
-Results will be added only after they are measured.
 
 ---
 
@@ -134,7 +133,7 @@ Results will be added only after they are measured.
 
 ## 🔭 Next steps
 
-- Run and publish the failure tests
+- Publish the failure tests
 - Add disk and memory alarms
 - Add HTTPS with a custom domain
 
@@ -145,6 +144,6 @@ Results will be added only after they are measured.
 ```
 cloudformation/   the 4 stage templates
 tools/probe.py    shows what a visitor sees during a failure
-docs/test-plan.md planned failure tests
+docs/test-plan.md failure tests
 screenshots/      proof of each deployed stage
 ```
