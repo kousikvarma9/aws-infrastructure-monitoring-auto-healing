@@ -1,8 +1,5 @@
 # Failure Test Plan and Expected Behaviour
 
-**Status: designed, not yet executed.** The "Expected behaviour" column below is a prediction
-based on how the system is configured. It is not a measurement. The measured columns are
-marked "Not measured" and will be filled in when the tests are run.
 
 ## System under test
 
@@ -15,7 +12,7 @@ marked "Not measured" and will be filled in when the tests are run.
 
 ## Test scenarios
 
-| # | Failure injected | How it is injected | Expected behaviour (prediction) |
+| # | Failure injected | How it is injected | Expected behaviour |
 | --- | --- | --- | --- |
 | 1 | App process killed | Open `/crash` once | Target unhealthy, alarm, restart or replacement | 
 | 2 | App service stopped | `systemctl stop demoapp` via SSM shell | Same as 1 |
@@ -42,7 +39,3 @@ marked "Not measured" and will be filled in when the tests are run.
 - Recovery time: failure injection to 2 healthy targets.
 - Healer: Automation execution output, or Auto Scaling Group activity history.
 
-## Results
-
-Not yet available. This section will be updated with the measured table, screenshots and
-`probe-log.csv` files after the tests are run.
