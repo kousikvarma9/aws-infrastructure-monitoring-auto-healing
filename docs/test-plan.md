@@ -15,18 +15,18 @@ marked "Not measured" and will be filled in when the tests are run.
 
 ## Test scenarios
 
-| # | Failure injected | How it is injected | Expected behaviour (prediction) | Measured detection time | Measured recovery time | Result |
+| # | Failure injected | How it is injected | Expected behaviour (prediction) |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | App process killed | Open `/crash` once | Target unhealthy, alarm, restart or replacement | Not measured | Not measured | Not run |
-| 2 | App service stopped | `systemctl stop demoapp` via SSM shell | Same as 1 | Not measured | Not measured | Not run |
-| 3 | Health endpoint failing, app running | `touch /opt/app/unhealthy` | Unhealthy, runbook clears the flag and restarts | Not measured | Not measured | Not run |
-| 4 | Instance stopped | EC2 console, Stop | Auto Scaling Group replaces it | Not measured | Not measured | Not run |
-| 5 | Instance terminated | EC2 console, Terminate | Auto Scaling Group replaces it | Not measured | Not measured | Not run |
-| 6 | Instance in the other AZ terminated | EC2 console, Terminate | Users still served by the surviving instance | Not measured | Not measured | Not run |
-| 7 | High CPU on both instances | Busy loops via SSM shell | CPU alarm, scale-out adds instances | Not measured | Not measured | Not run |
-| 8 | Burst of 5xx errors | Refresh `/error` repeatedly | 5xx alarm and email only; no healing expected | Not measured | Not measured | Not run |
-| 9 | Both apps stopped | `systemctl stop demoapp` on both | Total outage, then recovery | Not measured | Not measured | Not run |
-| 10 | Restart cannot fix the fault | Break `app.py`, restart service | Runbook escalates to replacement | Not measured | Not measured | Not run |
+| 1 | App process killed | Open `/crash` once | Target unhealthy, alarm, restart or replacement | 
+| 2 | App service stopped | `systemctl stop demoapp` via SSM shell | Same as 1 |
+| 3 | Health endpoint failing, app running | `touch /opt/app/unhealthy` | Unhealthy, runbook clears the flag and restarts |
+| 4 | Instance stopped | EC2 console, Stop | Auto Scaling Group replaces it | 
+| 5 | Instance terminated | EC2 console, Terminate | Auto Scaling Group replaces it | 
+| 6 | Instance in the other AZ terminated | EC2 console, Terminate | Users still served by the surviving instance |
+| 7 | High CPU on both instances | Busy loops via SSM shell | CPU alarm, scale-out adds instances |
+| 8 | Burst of 5xx errors | Refresh `/error` repeatedly | 5xx alarm and email only; no healing expected |
+| 9 | Both apps stopped | `systemctl stop demoapp` on both | Total outage, then recovery |
+| 10 | Restart cannot fix the fault | Break `app.py`, restart service | Runbook escalates to replacement |
 
 ## Known limits of this design (from the configuration, not from testing)
 
