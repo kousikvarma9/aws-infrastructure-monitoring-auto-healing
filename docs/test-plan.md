@@ -16,7 +16,7 @@ marked "Not measured" and will be filled in when the tests are run.
 ## Test scenarios
 
 | # | Failure injected | How it is injected | Expected behaviour (prediction) |
-| --- | --- | --- | --- | --- | --- | --- |
+| --- | --- | --- | --- |
 | 1 | App process killed | Open `/crash` once | Target unhealthy, alarm, restart or replacement | 
 | 2 | App service stopped | `systemctl stop demoapp` via SSM shell | Same as 1 |
 | 3 | Health endpoint failing, app running | `touch /opt/app/unhealthy` | Unhealthy, runbook clears the flag and restarts |
