@@ -6,7 +6,7 @@ This project is a small web app on AWS that **notices when a server breaks and r
 
 **Built with:** EC2 · Auto Scaling · Load Balancer · CloudWatch · SNS · EventBridge · Systems Manager · IAM · CloudFormation
 
----
+--- 
 
 ## 💡 The idea in 30 seconds
 
