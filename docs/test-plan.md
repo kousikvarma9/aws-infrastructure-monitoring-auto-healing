@@ -10,7 +10,7 @@
   restart the app, wait up to about 90 s, then ask the Auto Scaling Group to replace the instance if still unhealthy
 - Target-tracking scale-out policy on average CPU
 
-## Test scenarios
+## Test scenarios 
 
 | # | Failure injected | How it is injected | Expected behaviour |
 | --- | --- | --- | --- |
