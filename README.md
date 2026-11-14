@@ -12,7 +12,7 @@ This project is a small web app on AWS that **notices when a server breaks and r
 
 Imagine a small shop with two cashiers and a greeter at the door.
 
-- The **greeter** sends each customer to a free cashier.
+- The **greeter** sends each customer to a free cashier. 
 - If a cashier faints, the greeter **stops sending customers** to them.
 - A **manager** gets an alert, tries to wake the cashier up, and if that fails, **brings in a replacement**.
 
