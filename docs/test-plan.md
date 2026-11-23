@@ -2,7 +2,7 @@
 
 
 ## System under test
-
+ 
 - 2 EC2 instances in private subnets across 2 Availability Zones, behind an Application Load Balancer
 - Auto Scaling Group (min 2, max 4) with ELB health checks on `/health` (interval 15 s, 2 failures to mark unhealthy)
 - CloudWatch alarms: high CPU, unhealthy hosts, low healthy hosts, 5xx errors, with SNS email alerts
